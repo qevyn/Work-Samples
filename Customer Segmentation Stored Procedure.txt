@@ -1,0 +1,566 @@
+CREATE OR REPLACE PROCEDURE INSTORE_CONNECT.CAMPAIGNS.CREATE_TSMC_CUSTOMER_SEGMENTATION()
+RETURNS STRING
+LANGUAGE SQL
+EXECUTE AS CALLER
+AS
+$$
+BEGIN
+    --CALL INSTORE_CONNECT.CAMPAIGNS.CREATE_TSMC_CUSTOMER_SEGMENTATION()
+    CREATE OR REPLACE TABLE INSTORE_CONNECT.CAMPAIGNS.TSMC_CUSTOMER_SEGMENTATION (
+        CUSTOMERS_HIERARCHY STRING,
+        CAMPAIGN_CYCLE STRING,
+        CYCLE_START DATE,
+        CYCLE_END DATE,
+        WEEK_NUMBER INTEGER,
+        WEEK_START_DATE DATE,
+        WEEK_END_DATE DATE,
+        PERIOD STRING,
+        BANNER STRING,
+        STORE_NUMBER STRING,
+        TEST_START_DATE DATE,
+        "GROUP" STRING,
+        retailer STRING,
+        CLUSTER STRING,
+        store_name STRING,
+        city STRING,
+        state STRING,
+        zip STRING,
+        square_footage FLOAT,
+        lat FLOAT,
+        lon FLOAT,
+        QUAD_CAMPAIGN_ID STRING,
+        CAMPAIGN_START_DATE DATE,
+        CAMPAIGN_END_DATE DATE,
+        SALES_DATE DATE,
+        "Campaign Type" STRING,
+        "Promoted Type" STRING,
+        "Loyalty Customers" INTEGER,
+        IS_NEW_TO_UPC INTEGER,
+        IS_REENGAGED_UPC INTEGER,
+        IS_NEW_TO_BRAND INTEGER,
+        IS_REENGAGED_BRAND INTEGER,
+        IS_NEW_TO_CATEGORY INTEGER,
+        IS_REENGAGED_CATEGORY INTEGER
+    )
+    AS
+    
+    WITH BASE_DATA AS (
+            SELECT S.SALES_DATE,
+                S.TRANSACTION_ID,
+                S.STORE_NUMBER,
+                S.CUSTOMER_ID,
+                S.LOYALTY_STATUS,
+                S.DEPARTMENT_ID,
+                B.BRAND_OWNER_HIGH_MASKED AS MANUFACTURER,
+                B.L1_NAME AS DEPARTMENT,
+                B.L2_NAME AS CATEGORY,
+                B.L3_NAME AS SUBCATEGORY,
+                B.BRAND_FAMILY AS BRAND,
+                S.UPC,
+                S.SALES,
+                S.UNITS
+            FROM INSTORE_CONNECT.CD_TSMC.STORE_TRANSACTIONS_ITEM_SALES_TSMC S
+            JOIN INSTORE_CONNECT.CD_TSMC.PRODUCT_UPC B ON S.UPC = B.UPC
+            WHERE S.UNITS != 0
+        ),
+
+        CAMPAIGN_UPC_DATA AS (
+            SELECT
+                CU.CAMPAIGN_CYCLE,
+                CK.CYCLE_START AS CYCLE_START_DATE,
+                CK.CYCLE_END AS CYCLE_END_DATE,
+                CU.CAMPAIGN_START_DATE,
+                CASE
+                    WHEN CU.CAMPAIGN_END_DATE IS NULL AND CU.CAMPAIGN_START_DATE = CK.CYCLE_START THEN CK.CYCLE_END
+                    ELSE CU.CAMPAIGN_END_DATE
+                END AS CAMPAIGN_END_DATE,
+                CU.RETAILER,
+                CU.BANNER,
+                CU.QUAD_CAMPAIGN_ID,
+                CU."Promoted Type",
+                CASE WHEN CU.CPG THEN 'CPG' ELSE 'Retailer' END AS "Campaign Type",
+                CU.UPC,
+                CU.DEPT_NAME,
+                CU.CATEGORY,
+                CU.SUBCATEGORY,
+                CU.MANUFACTURER,
+                CU.BRAND,
+                CU.PRODUCT_DESCRIPTION,
+                DATEDIFF(DAY, CK.CYCLE_START, CK.CYCLE_END) + 1 AS CYCLE_DAYS
+            FROM INSTORE_CONNECT.CAMPAIGNS.SMARTSHEET_TSMC CU
+            LEFT JOIN INSTORE_CONNECT.CAMPAIGNS.CYCLE_KEY CK
+                ON CU.CAMPAIGN_CYCLE = CK.CAMPAIGN_CYCLE
+            WHERE CU.UPC IS NOT NULL
+        ),
+
+        CAMPAIGN_BRAND_DATA AS (
+            SELECT DISTINCT CU.CAMPAIGN_CYCLE,
+                CU.CYCLE_START_DATE,
+                CU.CYCLE_END_DATE,
+                CU.CAMPAIGN_START_DATE,
+                CU.CAMPAIGN_END_DATE,
+                CU.BANNER,
+                CU.QUAD_CAMPAIGN_ID,
+                CU."Promoted Type",
+                CU."Campaign Type",
+                CU.DEPT_NAME,
+                CU.CATEGORY,
+                CU.SUBCATEGORY,
+                CU.MANUFACTURER,
+                CU.BRAND,
+                B.UPC
+            FROM CAMPAIGN_UPC_DATA CU
+            JOIN INSTORE_CONNECT.CD_TSMC.PRODUCT_UPC B
+                ON B.BRAND_FAMILY = CU.BRAND
+                AND B.L1_NAME = CU.DEPT_NAME
+                AND B.L2_NAME = CU.CATEGORY
+                AND B.L3_NAME = CU.SUBCATEGORY
+                AND B.BRAND_OWNER_HIGH_MASKED = CU.MANUFACTURER
+        ),
+
+        CAMPAIGN_CATEGORY_DATA AS (
+            SELECT DISTINCT CU.CAMPAIGN_CYCLE,
+                CU.CYCLE_START_DATE,
+                CU.CYCLE_END_DATE,
+                CU.CAMPAIGN_START_DATE,
+                CU.CAMPAIGN_END_DATE,
+                CU.BANNER,
+                CU.QUAD_CAMPAIGN_ID,
+                CU."Promoted Type",
+                CU."Campaign Type",
+                CU.DEPT_NAME,
+                CU.CATEGORY,
+                B.L3_NAME AS SUBCATEGORY,
+                B.BRAND_OWNER_HIGH_MASKED AS MANUFACTURER,
+                B.BRAND_FAMILY AS BRAND,
+                B.UPC
+            FROM CAMPAIGN_UPC_DATA CU
+            JOIN INSTORE_CONNECT.CD_TSMC.PRODUCT_UPC B
+                ON B.L2_NAME = CU.CATEGORY
+                AND B.L1_NAME = CU.DEPT_NAME
+        ),
+
+        STORES_METADATA AS (
+            SELECT
+                tc.retailer,
+                tc.banner,
+                tc.store_id,
+                tc."GROUP",
+                tc.CLUSTER,
+                tc.TEST_START_DATE,
+                s.store_name,
+                s.market,
+                s.cass_city AS CITY,
+                s.cass_state AS STATE,
+                s.cass_zip AS ZIP,
+                s.totalarea AS square_footage,
+                s.lat,
+                s.lon
+            FROM INSTORE_CONNECT.CAMPAIGNS.TEST_CONTROL_KEY_V2 tc
+            LEFT JOIN INSTORE_CONNECT.CD_TSMC.STORES s
+                ON s.store_id = tc.store_id
+            WHERE tc.retailer = 'TSMC'
+                AND CURRENT_DATE >= TEST_START_DATE
+        ),
+
+        CAMPAIGN_ADVERTISED_UPC AS (
+            SELECT DISTINCT
+                CAMPAIGN_CYCLE,
+                QUAD_CAMPAIGN_ID,
+                "Campaign Type",
+                "Promoted Type",
+                CAMPAIGN_START_DATE,
+                CAMPAIGN_END_DATE,
+                UPC,
+                'Y' AS ADVERTISED_UPC
+            FROM CAMPAIGN_UPC_DATA
+        ),
+
+        CAMPAIGN_ADVERTISED_BRAND AS (
+            SELECT DISTINCT
+                CAMPAIGN_CYCLE,
+                QUAD_CAMPAIGN_ID,
+                "Campaign Type",
+                "Promoted Type",
+                CAMPAIGN_START_DATE,
+                CAMPAIGN_END_DATE,
+                BRAND,
+                'Y' AS ADVERTISED_BRAND
+            FROM CAMPAIGN_UPC_DATA
+            WHERE BRAND IS NOT NULL
+        ),
+
+        CAMPAIGN_ADVERTISED_CATEGORY AS (
+            SELECT DISTINCT
+                CAMPAIGN_CYCLE,
+                QUAD_CAMPAIGN_ID,
+                "Campaign Type",
+                "Promoted Type",
+                CAMPAIGN_START_DATE,
+                CAMPAIGN_END_DATE,
+                CATEGORY,
+                'Y' AS ADVERTISED_CATEGORY
+            FROM CAMPAIGN_UPC_DATA
+            WHERE CATEGORY IS NOT NULL
+        ),
+
+        UPC_PURCHASE_HISTORY AS (
+            SELECT DISTINCT CUSTOMER_ID, CATEGORY, BRAND, UPC, SALES_DATE
+            FROM BASE_DATA
+            WHERE CUSTOMER_ID IS NOT NULL
+        ),
+
+        UPC_PURCHASE_HISTORY_STORE AS (
+            SELECT DISTINCT STORE_NUMBER, CUSTOMER_ID, CATEGORY, BRAND, UPC, SALES_DATE
+            FROM BASE_DATA
+            WHERE CUSTOMER_ID IS NOT NULL
+        ),
+
+        FIRST_UPC_PURCHASE AS (
+            SELECT
+                CUSTOMER_ID,
+                UPC,
+                MIN(SALES_DATE) AS first_purchase_date,
+                'Y' AS first_purchase_flag
+            FROM UPC_PURCHASE_HISTORY
+            GROUP BY CUSTOMER_ID, UPC
+        ),
+
+        LAST_UPC_PURCHASE AS (
+            SELECT
+                p.CUSTOMER_ID,
+                cu.QUAD_CAMPAIGN_ID,
+                p.UPC,
+                p.SALES_DATE AS current_purchase_date,
+                MAX(p2.SALES_DATE) AS last_purchase_date
+            FROM UPC_PURCHASE_HISTORY p
+            JOIN CAMPAIGN_ADVERTISED_UPC cu
+                ON p.UPC = cu.UPC
+                AND p.SALES_DATE BETWEEN DATEADD(WEEK, -12, cu.CAMPAIGN_START_DATE) AND cu.CAMPAIGN_END_DATE
+            JOIN UPC_PURCHASE_HISTORY p2
+                ON p2.CUSTOMER_ID = p.CUSTOMER_ID
+                AND p2.UPC IN (
+                    SELECT DISTINCT UPC
+                    FROM CAMPAIGN_ADVERTISED_UPC cu3
+                    WHERE cu3.QUAD_CAMPAIGN_ID = cu.QUAD_CAMPAIGN_ID
+                )
+                AND p2.SALES_DATE < p.SALES_DATE
+            GROUP BY p.CUSTOMER_ID, cu.QUAD_CAMPAIGN_ID, p.UPC, p.SALES_DATE
+        ),
+
+        BRAND_PURCHASE_HISTORY AS (
+            SELECT DISTINCT CUSTOMER_ID, BRAND, SALES_DATE
+            FROM BASE_DATA
+            WHERE CUSTOMER_ID IS NOT NULL
+        ),
+
+        FIRST_BRAND_PURCHASE AS (
+            SELECT
+                CUSTOMER_ID,
+                BRAND,
+                MIN(SALES_DATE) AS first_purchase_date,
+                'Y' AS first_purchase_flag
+            FROM BRAND_PURCHASE_HISTORY
+            GROUP BY CUSTOMER_ID, BRAND
+        ),
+
+        LAST_BRAND_PURCHASE AS (
+            SELECT
+                p.CUSTOMER_ID,
+                cu.QUAD_CAMPAIGN_ID,
+                p.BRAND,
+                p.SALES_DATE AS current_purchase_date,
+                MAX(p2.SALES_DATE) AS last_purchase_date
+            FROM BRAND_PURCHASE_HISTORY p
+            JOIN CAMPAIGN_ADVERTISED_BRAND cu
+                ON p.BRAND = cu.BRAND
+                AND p.SALES_DATE BETWEEN DATEADD(WEEK, -12, cu.CAMPAIGN_START_DATE) AND cu.CAMPAIGN_END_DATE
+            JOIN BRAND_PURCHASE_HISTORY p2
+                ON p2.CUSTOMER_ID = p.CUSTOMER_ID
+                AND p2.BRAND IN (
+                    SELECT DISTINCT BRAND
+                    FROM CAMPAIGN_ADVERTISED_BRAND cu3
+                    WHERE cu3.QUAD_CAMPAIGN_ID = cu.QUAD_CAMPAIGN_ID
+                )
+                AND p2.SALES_DATE < p.SALES_DATE
+            GROUP BY p.CUSTOMER_ID, cu.QUAD_CAMPAIGN_ID, p.BRAND, p.SALES_DATE
+        ),
+
+        CATEGORY_PURCHASE_HISTORY AS (
+            SELECT DISTINCT CUSTOMER_ID, CATEGORY, SALES_DATE
+            FROM BASE_DATA
+            WHERE CUSTOMER_ID IS NOT NULL
+        ),
+
+        FIRST_CATEGORY_PURCHASE AS (
+            SELECT
+                CUSTOMER_ID,
+                CATEGORY,
+                MIN(SALES_DATE) AS first_purchase_date,
+                'Y' AS first_purchase_flag
+            FROM CATEGORY_PURCHASE_HISTORY
+            GROUP BY CUSTOMER_ID, CATEGORY
+        ),
+
+        LAST_CATEGORY_PURCHASE AS (
+            SELECT
+                p.CUSTOMER_ID,
+                cu.QUAD_CAMPAIGN_ID,
+                p.CATEGORY,
+                p.SALES_DATE AS current_purchase_date,
+                MAX(p2.SALES_DATE) AS last_purchase_date
+            FROM CATEGORY_PURCHASE_HISTORY p
+            JOIN CAMPAIGN_ADVERTISED_CATEGORY cu
+                ON p.CATEGORY = cu.CATEGORY
+                AND p.SALES_DATE BETWEEN DATEADD(WEEK, -12, cu.CAMPAIGN_START_DATE) AND cu.CAMPAIGN_END_DATE
+            JOIN CATEGORY_PURCHASE_HISTORY p2
+                ON p2.CUSTOMER_ID = p.CUSTOMER_ID
+                AND p2.CATEGORY IN (
+                    SELECT DISTINCT CATEGORY
+                    FROM CAMPAIGN_ADVERTISED_CATEGORY cu3
+                    WHERE cu3.QUAD_CAMPAIGN_ID = cu.QUAD_CAMPAIGN_ID
+                )
+                AND p2.SALES_DATE < p.SALES_DATE
+            GROUP BY p.CUSTOMER_ID, cu.QUAD_CAMPAIGN_ID, p.CATEGORY, p.SALES_DATE
+        ),
+
+        REENGAGEMENT_FLAGS AS (
+            SELECT DISTINCT
+                p.STORE_NUMBER,
+                p.CUSTOMER_ID,
+                p.UPC,
+                p.BRAND,
+                p.CATEGORY,
+                p.SALES_DATE,
+                CASE
+                    WHEN lup.last_purchase_date IS NULL OR DATEDIFF(DAY, lup.last_purchase_date, p.SALES_DATE) >= 365 THEN 1
+                    ELSE 0
+                END AS IS_NEW_TO_UPC,
+                CASE
+                    WHEN lup.last_purchase_date IS NOT NULL
+                        AND DATEDIFF(DAY, lup.last_purchase_date, p.SALES_DATE) BETWEEN 182 AND 364 THEN 1
+                    ELSE 0
+                END AS IS_REENGAGED_UPC,
+                CASE
+                    WHEN lbp.last_purchase_date IS NULL OR DATEDIFF(DAY, lbp.last_purchase_date, p.SALES_DATE) >= 365 THEN 1
+                    ELSE 0
+                END AS IS_NEW_TO_BRAND,
+                CASE
+                    WHEN lbp.last_purchase_date IS NOT NULL
+                        AND DATEDIFF(DAY, lbp.last_purchase_date, p.SALES_DATE) BETWEEN 182 AND 364 THEN 1
+                    ELSE 0
+                END AS IS_REENGAGED_BRAND,
+                CASE
+                    WHEN lcp.last_purchase_date IS NULL OR DATEDIFF(DAY, lcp.last_purchase_date, p.SALES_DATE) >= 365 THEN 1
+                    ELSE 0
+                END AS IS_NEW_TO_CATEGORY,
+                CASE
+                    WHEN lcp.last_purchase_date IS NOT NULL
+                        AND DATEDIFF(DAY, lcp.last_purchase_date, p.SALES_DATE) BETWEEN 182 AND 364 THEN 1
+                    ELSE 0
+                END AS IS_REENGAGED_CATEGORY
+            FROM UPC_PURCHASE_HISTORY_STORE p
+            JOIN CAMPAIGN_ADVERTISED_UPC cu
+                ON p.UPC = cu.UPC
+                AND p.SALES_DATE BETWEEN DATEADD(WEEK, -12, cu.CAMPAIGN_START_DATE) AND cu.CAMPAIGN_END_DATE
+            LEFT JOIN FIRST_UPC_PURCHASE fup
+                ON fup.CUSTOMER_ID = p.CUSTOMER_ID
+                AND fup.UPC = p.UPC
+                AND fup.first_purchase_date = p.SALES_DATE
+            LEFT JOIN LAST_UPC_PURCHASE lup
+                ON lup.CUSTOMER_ID = p.CUSTOMER_ID
+                AND lup.QUAD_CAMPAIGN_ID = cu.QUAD_CAMPAIGN_ID
+                AND lup.current_purchase_date = p.SALES_DATE
+                AND lup.UPC = p.UPC
+            LEFT JOIN FIRST_BRAND_PURCHASE fbp
+                ON fbp.CUSTOMER_ID = p.CUSTOMER_ID
+                AND fbp.BRAND = p.BRAND
+                AND fbp.first_purchase_date = p.SALES_DATE
+            LEFT JOIN LAST_BRAND_PURCHASE lbp
+                ON lbp.CUSTOMER_ID = p.CUSTOMER_ID
+                AND lbp.QUAD_CAMPAIGN_ID = cu.QUAD_CAMPAIGN_ID
+                AND lbp.current_purchase_date = p.SALES_DATE
+                AND lbp.BRAND = p.BRAND
+            LEFT JOIN FIRST_CATEGORY_PURCHASE fcp
+                ON fcp.CUSTOMER_ID = p.CUSTOMER_ID
+                AND fcp.CATEGORY = p.CATEGORY
+                AND fcp.first_purchase_date = p.SALES_DATE
+            LEFT JOIN LAST_CATEGORY_PURCHASE lcp
+                ON lcp.CUSTOMER_ID = p.CUSTOMER_ID
+                AND lcp.QUAD_CAMPAIGN_ID = cu.QUAD_CAMPAIGN_ID
+                AND lcp.current_purchase_date = p.SALES_DATE
+                AND lcp.CATEGORY = p.CATEGORY
+        )
+
+    SELECT
+        'Purchased Promoted Products' AS CUSTOMERS_HIERARCHY,
+        B.CAMPAIGN_CYCLE,
+        B.CYCLE_START_DATE AS CYCLE_START,
+        B.CYCLE_END_DATE AS CYCLE_END,
+        FLOOR(DATEDIFF(DAY, B.CYCLE_START_DATE, A.SALES_DATE) / 7) AS WEEK_NUMBER,
+        DATEADD(DAY, FLOOR(DATEDIFF(DAY, B.CYCLE_START_DATE, A.SALES_DATE) / 7) * 7, B.CYCLE_START_DATE) AS WEEK_START_DATE,
+        DATEADD(DAY, FLOOR(DATEDIFF(DAY, B.CYCLE_START_DATE, A.SALES_DATE) / 7) * 7 + 6, B.CYCLE_START_DATE) AS WEEK_END_DATE,
+        CASE
+            WHEN A.SALES_DATE BETWEEN DATEADD(WEEK, -12, B.CAMPAIGN_START_DATE) AND DATEADD(DAY, -1, B.CAMPAIGN_START_DATE) THEN 'CY Pre-Campaign' 
+            WHEN A.SALES_DATE BETWEEN B.CAMPAIGN_START_DATE AND B.CAMPAIGN_END_DATE THEN 'CY Campaign'
+        END AS PERIOD,
+        S.BANNER,
+        A.STORE_NUMBER,
+        S.TEST_START_DATE,
+        S."GROUP",
+        S.retailer,
+        S.CLUSTER,
+        S.store_name,
+        S.city,
+        S.state,
+        S.zip,
+        S.square_footage,
+        S.lat,
+        S.lon,
+        B.QUAD_CAMPAIGN_ID,
+        B.CAMPAIGN_START_DATE,
+        B.CAMPAIGN_END_DATE,
+        A.SALES_DATE,
+        B."Campaign Type",
+        B."Promoted Type",
+        COUNT(DISTINCT A.CUSTOMER_ID) AS "Loyalty Customers",
+        COUNT(DISTINCT CASE WHEN RF.IS_NEW_TO_UPC = 1 THEN A.CUSTOMER_ID END) AS IS_NEW_TO_UPC,
+        COUNT(DISTINCT CASE WHEN RF.IS_REENGAGED_UPC = 1 THEN A.CUSTOMER_ID END) AS IS_REENGAGED_UPC,
+        COUNT(DISTINCT CASE WHEN RF.IS_NEW_TO_BRAND = 1 THEN A.CUSTOMER_ID END) AS IS_NEW_TO_BRAND,
+        COUNT(DISTINCT CASE WHEN RF.IS_REENGAGED_BRAND = 1 THEN A.CUSTOMER_ID END) AS IS_REENGAGED_BRAND,
+        COUNT(DISTINCT CASE WHEN RF.IS_NEW_TO_CATEGORY = 1 THEN A.CUSTOMER_ID END) AS IS_NEW_TO_CATEGORY,
+        COUNT(DISTINCT CASE WHEN RF.IS_REENGAGED_CATEGORY = 1 THEN A.CUSTOMER_ID END) AS IS_REENGAGED_CATEGORY
+    FROM BASE_DATA A
+    JOIN STORES_METADATA S
+        ON S.store_id = A.STORE_NUMBER
+        AND DATEADD(WEEK, 12, A.SALES_DATE) >= S.TEST_START_DATE
+    JOIN CAMPAIGN_UPC_DATA B
+        ON B.BANNER = S.BANNER
+        AND B.UPC = A.UPC
+        AND A.SALES_DATE BETWEEN DATEADD(WEEK, -12, B.CAMPAIGN_START_DATE) AND B.CAMPAIGN_END_DATE
+    LEFT JOIN REENGAGEMENT_FLAGS RF
+        ON RF.STORE_NUMBER = A.STORE_NUMBER
+        AND RF.CUSTOMER_ID = A.CUSTOMER_ID
+        AND RF.SALES_DATE = A.SALES_DATE
+        AND RF.UPC = A.UPC
+    GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27
+        
+    UNION ALL
+    
+    SELECT
+        'Purchased Promoted Brands' AS CUSTOMERS_HIERARCHY,
+        B.CAMPAIGN_CYCLE,
+        B.CYCLE_START_DATE AS CYCLE_START,
+        B.CYCLE_END_DATE AS CYCLE_END,
+        FLOOR(DATEDIFF(DAY, B.CYCLE_START_DATE, A.SALES_DATE) / 7) AS WEEK_NUMBER,
+        DATEADD(DAY, FLOOR(DATEDIFF(DAY, B.CYCLE_START_DATE, A.SALES_DATE) / 7) * 7, B.CYCLE_START_DATE) AS WEEK_START_DATE,
+        DATEADD(DAY, FLOOR(DATEDIFF(DAY, B.CYCLE_START_DATE, A.SALES_DATE) / 7) * 7 + 6, B.CYCLE_START_DATE) AS WEEK_END_DATE,
+        CASE
+            WHEN A.SALES_DATE BETWEEN DATEADD(WEEK, -12, B.CAMPAIGN_START_DATE) AND DATEADD(DAY, -1, B.CAMPAIGN_START_DATE) THEN 'CY Pre-Campaign' 
+            WHEN A.SALES_DATE BETWEEN B.CAMPAIGN_START_DATE AND B.CAMPAIGN_END_DATE THEN 'CY Campaign'
+        END AS PERIOD,
+        S.BANNER,
+        A.STORE_NUMBER,
+        S.TEST_START_DATE,
+        S."GROUP",
+        S.retailer,
+        S.CLUSTER,
+        S.store_name,
+        S.city,
+        S.state,
+        S.zip,
+        S.square_footage,
+        S.lat,
+        S.lon,
+        B.QUAD_CAMPAIGN_ID,
+        B.CAMPAIGN_START_DATE,
+        B.CAMPAIGN_END_DATE,
+        A.SALES_DATE,
+        B."Campaign Type",
+        B."Promoted Type",
+        COUNT(DISTINCT A.CUSTOMER_ID) AS "Loyalty Customers",
+        COUNT(DISTINCT CASE WHEN RF.IS_NEW_TO_UPC = 1 THEN A.CUSTOMER_ID END) AS IS_NEW_TO_UPC,
+        COUNT(DISTINCT CASE WHEN RF.IS_REENGAGED_UPC = 1 THEN A.CUSTOMER_ID END) AS IS_REENGAGED_UPC,
+        COUNT(DISTINCT CASE WHEN RF.IS_NEW_TO_BRAND = 1 THEN A.CUSTOMER_ID END) AS IS_NEW_TO_BRAND,
+        COUNT(DISTINCT CASE WHEN RF.IS_REENGAGED_BRAND = 1 THEN A.CUSTOMER_ID END) AS IS_REENGAGED_BRAND,
+        COUNT(DISTINCT CASE WHEN RF.IS_NEW_TO_CATEGORY = 1 THEN A.CUSTOMER_ID END) AS IS_NEW_TO_CATEGORY,
+        COUNT(DISTINCT CASE WHEN RF.IS_REENGAGED_CATEGORY = 1 THEN A.CUSTOMER_ID END) AS IS_REENGAGED_CATEGORY
+    FROM BASE_DATA A
+    JOIN STORES_METADATA S
+        ON S.store_id = A.STORE_NUMBER
+        AND DATEADD(WEEK, 12, A.SALES_DATE) >= S.TEST_START_DATE
+    JOIN CAMPAIGN_BRAND_DATA B
+        ON B.BANNER = S.BANNER
+        AND B.UPC = A.UPC
+        AND A.SALES_DATE BETWEEN DATEADD(WEEK, -12, B.CAMPAIGN_START_DATE) AND B.CAMPAIGN_END_DATE
+    LEFT JOIN REENGAGEMENT_FLAGS RF
+        ON RF.STORE_NUMBER = A.STORE_NUMBER
+        AND RF.CUSTOMER_ID = A.CUSTOMER_ID
+        AND RF.SALES_DATE = A.SALES_DATE
+        AND RF.UPC = A.UPC
+    GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27
+
+    UNION ALL
+
+    SELECT
+        'Purchased Promoted Categories' AS CUSTOMERS_HIERARCHY,
+        B.CAMPAIGN_CYCLE,
+        B.CYCLE_START_DATE AS CYCLE_START,
+        B.CYCLE_END_DATE AS CYCLE_END,
+        FLOOR(DATEDIFF(DAY, B.CYCLE_START_DATE, A.SALES_DATE) / 7) AS WEEK_NUMBER,
+        DATEADD(DAY, FLOOR(DATEDIFF(DAY, B.CYCLE_START_DATE, A.SALES_DATE) / 7) * 7, B.CYCLE_START_DATE) AS WEEK_START_DATE,
+        DATEADD(DAY, FLOOR(DATEDIFF(DAY, B.CYCLE_START_DATE, A.SALES_DATE) / 7) * 7 + 6, B.CYCLE_START_DATE) AS WEEK_END_DATE,
+        CASE
+            WHEN A.SALES_DATE BETWEEN DATEADD(WEEK, -12, B.CAMPAIGN_START_DATE) AND DATEADD(DAY, -1, B.CAMPAIGN_START_DATE) THEN 'CY Pre-Campaign' 
+            WHEN A.SALES_DATE BETWEEN B.CAMPAIGN_START_DATE AND B.CAMPAIGN_END_DATE THEN 'CY Campaign'
+        END AS PERIOD,
+        S.BANNER,
+        A.STORE_NUMBER,
+        S.TEST_START_DATE,
+        S."GROUP",
+        S.retailer,
+        S.CLUSTER,
+        S.store_name,
+        S.city,
+        S.state,
+        S.zip,
+        S.square_footage,
+        S.lat,
+        S.lon,
+        B.QUAD_CAMPAIGN_ID,
+        B.CAMPAIGN_START_DATE,
+        B.CAMPAIGN_END_DATE,
+        A.SALES_DATE,
+        B."Campaign Type",
+        B."Promoted Type",
+        COUNT(DISTINCT A.CUSTOMER_ID) AS "Loyalty Customers",
+        COUNT(DISTINCT CASE WHEN RF.IS_NEW_TO_UPC = 1 THEN A.CUSTOMER_ID END) AS IS_NEW_TO_UPC,
+        COUNT(DISTINCT CASE WHEN RF.IS_REENGAGED_UPC = 1 THEN A.CUSTOMER_ID END) AS IS_REENGAGED_UPC,
+        COUNT(DISTINCT CASE WHEN RF.IS_NEW_TO_BRAND = 1 THEN A.CUSTOMER_ID END) AS IS_NEW_TO_BRAND,
+        COUNT(DISTINCT CASE WHEN RF.IS_REENGAGED_BRAND = 1 THEN A.CUSTOMER_ID END) AS IS_REENGAGED_BRAND,
+        COUNT(DISTINCT CASE WHEN RF.IS_NEW_TO_CATEGORY = 1 THEN A.CUSTOMER_ID END) AS IS_NEW_TO_CATEGORY,
+        COUNT(DISTINCT CASE WHEN RF.IS_REENGAGED_CATEGORY = 1 THEN A.CUSTOMER_ID END) AS IS_REENGAGED_CATEGORY
+    FROM BASE_DATA A
+    JOIN STORES_METADATA S
+        ON S.store_id = A.STORE_NUMBER
+        AND DATEADD(WEEK, 12, A.SALES_DATE) >= S.TEST_START_DATE
+    JOIN CAMPAIGN_CATEGORY_DATA B
+        ON B.BANNER = S.BANNER
+        AND B.UPC = A.UPC
+        AND A.SALES_DATE BETWEEN DATEADD(WEEK, -12, B.CAMPAIGN_START_DATE) AND B.CAMPAIGN_END_DATE
+    LEFT JOIN REENGAGEMENT_FLAGS RF
+        ON RF.STORE_NUMBER = A.STORE_NUMBER
+        AND RF.CUSTOMER_ID = A.CUSTOMER_ID
+        AND RF.SALES_DATE = A.SALES_DATE
+        AND RF.UPC = A.UPC
+    GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27;
+        
+
+    RETURN 'TSMC_CUSTOMER_SEGMENTATION table created successfully';
+EXCEPTION
+    WHEN OTHER THEN
+        -- Drop temporary table in case of error to avoid leaving it behind
+        DROP TABLE IF EXISTS INSTORE_CONNECT.CAMPAIGNS.TEMP_BASE_DATA;
+        RAISE;
+END;
+$$;
